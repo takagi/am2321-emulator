@@ -5,7 +5,10 @@
 
 (in-package :cl-user)
 (defpackage am2321
-  (:use :cl))
+  (:use :cl)
+  (:export #:run
+           #:run-master
+           #:run-slave))
 (in-package :am2321)
 
 

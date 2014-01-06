@@ -24,7 +24,6 @@
 (defstruct (register (:constructor %make-register))
   pc tags stack entry
   r0 r1 r2 r3
-  arg0 arg1 arg2 arg3
   ret)
 
 (defun make-register (pc tags)
@@ -42,10 +41,6 @@
 (define-symbol-macro *r1* (register-r1 *current*))
 (define-symbol-macro *r2* (register-r2 *current*))
 (define-symbol-macro *r3* (register-r3 *current*))
-(define-symbol-macro *arg0* (register-arg0 *current*))
-(define-symbol-macro *arg1* (register-arg1 *current*))
-(define-symbol-macro *arg2* (register-arg2 *current*))
-(define-symbol-macro *arg3* (register-arg3 *current*))
 (define-symbol-macro *ret* (register-ret *current*))
 
 
@@ -77,10 +72,6 @@
     (:r1 (setf *r1* value))
     (:r2 (setf *r2* value))
     (:r3 (setf *r3* value))
-    (:arg0 (setf *arg0* value))
-    (:arg1 (setf *arg1* value))
-    (:arg2 (setf *arg2* value))
-    (:arg3 (setf *arg3* value))
     (:ret (setf *ret* value))))
 
 
@@ -146,13 +137,16 @@
 ;;;
 
 (defmacro defsub (name args &body insts)
-  (declare (ignore args))
   (alexandria:with-gensyms (pc tags)
-    `(let ((,pc (remove-tags ',insts))
-           (,tags (make-tags ',insts)))
-       (setf (get ',name 'defsub) t
-             (get ',name 'pc) ,pc
-             (get ',name 'tags) ,tags))))
+    `(progn
+       (unless (listp ',args)
+         (error 'type-error :datum ',args :expected-type 'list))
+       (let ((,pc (remove-tags ',insts))
+             (,tags (make-tags ',insts)))
+         (setf (get ',name 'defsub) t
+               (get ',name 'pc) ,pc
+               (get ',name 'tags) ,tags
+               (get ',name 'args) ',args)))))
 
 (defun subroutine-pc (name)
   (unless (get name 'defsub)
@@ -163,6 +157,11 @@
   (unless (get name 'defsub)
     (error "The sub routine ~S not found." name))
   (get name 'tags))
+
+(defun subroutine-args (name)
+  (unless (get name 'defsub)
+    (error "The sub routine ~S not found." name))
+  (get name 'args))
 
 
 ;;;
@@ -227,28 +226,37 @@
         (inc-pc))))
 
 (defun eval-call (inst)
-  (destructuring-bind (call name) inst
+  (destructuring-bind (call name . args) inst
     (unless (eql call 'call)
       (error "The instruction ~S is invalid." inst))
-    (stack-push-frame)
-    (setf *pc* (subroutine-pc name)
-          *tags* (subroutine-tags name)
-          *r0* nil
-          *r1* nil
-          *r2* nil
-          *r3* nil)))
+    (unless (alexandria:length= args (subroutine-args name))
+      (error "Invalid number of arguments: ~S" (length args)))
+    (let ((args1 (mapcar #'eval args)))
+      (stack-push-frame)
+      (setf *pc* (subroutine-pc name)
+            *tags* (subroutine-tags name))
+      (set-reg :r0 nil)
+      (set-reg :r1 nil)
+      (set-reg :r2 nil)
+      (set-reg :r3 nil)
+      (set-reg :ret nil)
+      (loop for reg in (subroutine-args name)
+            for val in args1
+         do (set-reg reg val)))))
 
 (defun eval-return (inst)
-  (destructuring-bind (return) inst
+  (destructuring-bind (return . value) inst
     (unless (eql return 'return)
       (error "The instruction ~S is invalid." inst))
+    (when value
+      (set-reg :ret (eval (car value)))))
     (multiple-value-bind (pc tags r0 r1 r2 r3) (stack-pop-frame)
       (setf *pc* pc
-            *tags* tags
-            *r0* r0
-            *r1* r1
-            *r2* r2
-            *r3* r3))
+            *tags* tags)
+      (set-reg :r0 r0)
+      (set-reg :r1 r1)
+      (set-reg :r2 r2)
+      (set-reg :r3 r3)
     (inc-pc)))
 
 (defun eval-reset (inst)
@@ -331,10 +339,10 @@
 
 (defsub slave-read-bit ()
   (wait (high *scl*))
-  (set-reg :ret (if (high *sda*) 1 0))
+  (set-reg :r0 (if (high *sda*) 1 0))
   (wait (low *scl*))
 ;  (print "[SLAVE] Read bit: ~S~%" *ret*)
-  (return))
+  (return *r0*))
 
 (defsub slave-read-byte ()
   (set-reg :r0 0)
@@ -348,12 +356,12 @@
   (call slave-read-bit) (set-reg :r0 (logior (ash *r0* 1) *ret*))
   (print "[SLAVE] Read byte: ~S~%" *r0*)
   (call slave-send-ack)
-  (return))
+  (return *r0*))
 
-;; arg0: ACK/NACK
-(defsub slave-receive-ack ()
+;; :r0 - ACK/NACK
+(defsub slave-receive-ack (:r0)
   (wait (high *scl*))
-  (if-jump *arg0* :nack)
+  (if-jump *r0* :nack)
   (if-jump (low *sda*) :received-ack)
   (error "[SLAVE] miss ACK.~%")
   :received-ack
@@ -368,35 +376,35 @@
   (wait (low *scl*))
   (return))
 
-;; arg0: bit to be written
-(defsub slave-write-bit ()
-  (if-jump (not (= *arg0* 0)) :high)
+;; :r0 - bit to be written
+(defsub slave-write-bit (:r0)
+  (if-jump (not (= *r0* 0)) :high)
   (set-sda :low)
   (jump :endif)
   :high
-  (if-jump (not (= *arg0* 1)) :error)
+  (if-jump (not (= *r0* 1)) :error)
   (set-sda :high)
   (jump :endif)
   :error
-  (error "[SLAVE] The value ~S is invalid.~%" *arg0*)
+  (error "[SLAVE] The value ~S is invalid.~%" *r0*)
   :endif
   (wait (high *scl*))
   (wait (low *scl*))
   (return))
 
-;; arg0: byte to be written, arg1: ACK/NACK
-(defsub slave-write-byte ()
-  (print "[SLAVE] Sending byte: ~S~%" *arg0*)
-  (set-reg :r0 *arg0*)
-  (set-reg :arg0 (ldb (byte 1 7) *r0*)) (call slave-write-bit)
-  (set-reg :arg0 (ldb (byte 1 6) *r0*)) (call slave-write-bit)
-  (set-reg :arg0 (ldb (byte 1 5) *r0*)) (call slave-write-bit)
-  (set-reg :arg0 (ldb (byte 1 4) *r0*)) (call slave-write-bit)
-  (set-reg :arg0 (ldb (byte 1 3) *r0*)) (call slave-write-bit)
-  (set-reg :arg0 (ldb (byte 1 2) *r0*)) (call slave-write-bit)
-  (set-reg :arg0 (ldb (byte 1 1) *r0*)) (call slave-write-bit)
-  (set-reg :arg0 (ldb (byte 1 0) *r0*)) (call slave-write-bit)
-  (set-reg :arg0 *arg1*) (call slave-receive-ack)
+;; :r0 - byte to be written
+;; :r1 - ACK/NACK
+(defsub slave-write-byte (:r0 :r1)
+  (print "[SLAVE] Sending byte: ~S~%" *r0*)
+  (call slave-write-bit (ldb (byte 1 7) *r0*))
+  (call slave-write-bit (ldb (byte 1 6) *r0*))
+  (call slave-write-bit (ldb (byte 1 5) *r0*))
+  (call slave-write-bit (ldb (byte 1 4) *r0*))
+  (call slave-write-bit (ldb (byte 1 3) *r0*))
+  (call slave-write-bit (ldb (byte 1 2) *r0*))
+  (call slave-write-bit (ldb (byte 1 1) *r0*))
+  (call slave-write-bit (ldb (byte 1 0) *r0*))
+  (call slave-receive-ack *r1*)
   (return))
 
 (defsub slave ()
@@ -411,18 +419,12 @@
   ;; receive measured temperature
   (call wait-start-condition)
   (call slave-read-byte)
-  (set-reg :arg0 #X03) (set-reg :arg1 nil)
-  (call slave-write-byte)
-  (set-reg :arg0 #X02) (set-reg :arg1 nil)
-  (call slave-write-byte)
-  (set-reg :arg0 #X00) (set-reg :arg1 nil)
-  (call slave-write-byte)
-  (set-reg :arg0 #XA2) (set-reg :arg1 nil)
-  (call slave-write-byte)
-  (set-reg :arg0 #XFF) (set-reg :arg1 nil)
-  (call slave-write-byte)
-  (set-reg :arg0 #XFF) (set-reg :arg1 t)
-  (call slave-write-byte)
+  (call slave-write-byte #X03 nil)
+  (call slave-write-byte #X02 nil)
+  (call slave-write-byte #X00 nil)
+  (call slave-write-byte #X02 nil)
+  (call slave-write-byte #XFF nil)
+  (call slave-write-byte #XFF t)
   (call wait-stop-condition)
   (reset))
 
@@ -464,50 +466,39 @@
   :error
   (error "[MASTER] miss ACK.~%"))
 
-;; arg0: bit to be written
-(defsub master-write-bit ()
-  (if-jump (not (= *arg0* 1)) :low)
+;; :r0 - bit to be written
+(defsub master-write-bit (:r0)
+  (if-jump (not (= *r0* 0)) :high)
+  (set-sda :low)
+  (jump :endif)
+  :high
+  (if-jump (not (= *r0* 1)) :error)
   (set-sda :high)
   (jump :endif)
-  :low
-  (set-sda :low)
+  :error
+  (error "[MASTER] The value ~S is invalid.~%" *r0*)
   :endif
   (set-scl :high) (call delay)
   (set-scl :low) (call delay)
   (return))
 
-;; arg0: byte to be written
-(defsub master-write-byte ()
-  (print "[MASTER] Sending byte: ~S~%" *arg0*)
-  (set-reg :r0 *arg0*)
-  (set-reg :arg0 (ldb (byte 1 7) *r0*))
-  (call master-write-bit)
-  (set-reg :r0 (ash *r0* 1))
-  (set-reg :arg0 (ldb (byte 1 7) *r0*))
-  (call master-write-bit)
-  (set-reg :r0 (ash *r0* 1))
-  (set-reg :arg0 (ldb (byte 1 7) *r0*))
-  (call master-write-bit)
-  (set-reg :r0 (ash *r0* 1))
-  (set-reg :arg0 (ldb (byte 1 7) *r0*))
-  (call master-write-bit)
-  (set-reg :r0 (ash *r0* 1))
-  (set-reg :arg0 (ldb (byte 1 7) *r0*))
-  (call master-write-bit)
-  (set-reg :r0 (ash *r0* 1))
-  (set-reg :arg0 (ldb (byte 1 7) *r0*))
-  (call master-write-bit)
-  (set-reg :r0 (ash *r0* 1))
-  (set-reg :arg0 (ldb (byte 1 7) *r0*))
-  (call master-write-bit)
-  (set-reg :r0 (ash *r0* 1))
-  (set-reg :arg0 (ldb (byte 1 7) *r0*))
-  (call master-write-bit)
+;; :r0 - byte to be written
+(defsub master-write-byte (:r0)
+  (print "[MASTER] Sending byte: ~S~%" *r0*)
+  (call master-write-bit (ldb (byte 1 7) *r0*))
+  (call master-write-bit (ldb (byte 1 6) *r0*))
+  (call master-write-bit (ldb (byte 1 5) *r0*))
+  (call master-write-bit (ldb (byte 1 4) *r0*))
+  (call master-write-bit (ldb (byte 1 3) *r0*))
+  (call master-write-bit (ldb (byte 1 2) *r0*))
+  (call master-write-bit (ldb (byte 1 1) *r0*))
+  (call master-write-bit (ldb (byte 1 0) *r0*))
   (call master-receive-ack)
   (return))
 
-(defsub master-send-ack ()
-  (if-jump (not (null *arg0*)) :nack)
+;; :r0 - ACK/NACK
+(defsub master-send-ack (:r0)
+  (if-jump (not (null *r0*)) :nack)
   (set-sda :low)
   (jump :endif)
   :nack
@@ -520,46 +511,45 @@
 (defsub master-read-bit ()
   (set-scl :high) (call delay)
   (if-jump (not (high *sda*)) :low)
-  (set-reg :ret 1)
+  (set-reg :r0 1)
   (jump :endif)
   :low
-  (set-reg :ret 0)
+  (set-reg :r0 0)
   :endif
 ;  (print "[MASTER] Read bit: ~S~%" *ret*)
   (set-scl :low) (call delay)
-  (return))
+  (return *r0*))
 
-;; arg0: ACK/NACK
-(defsub master-read-byte ()
-  (set-reg :r0 0)
-  (set-reg :r1 *arg0*)
-  (call master-read-bit) (set-reg :r0 (logior (ash *r0* 1) *ret*))
-  (call master-read-bit) (set-reg :r0 (logior (ash *r0* 1) *ret*))
-  (call master-read-bit) (set-reg :r0 (logior (ash *r0* 1) *ret*))
-  (call master-read-bit) (set-reg :r0 (logior (ash *r0* 1) *ret*))
-  (call master-read-bit) (set-reg :r0 (logior (ash *r0* 1) *ret*))
-  (call master-read-bit) (set-reg :r0 (logior (ash *r0* 1) *ret*))
-  (call master-read-bit) (set-reg :r0 (logior (ash *r0* 1) *ret*))
-  (call master-read-bit) (set-reg :r0 (logior (ash *r0* 1) *ret*))
-  (print "[MASTER] Read byte: ~S~%" *r0*)
-  (set-reg :arg0 *r1*) (call master-send-ack)
-  (return))
+;; r0: ACK/NACK
+(defsub master-read-byte (:r0)
+  (set-reg :r1 0)
+  (call master-read-bit) (set-reg :r1 (logior (ash *r1* 1) *ret*))
+  (call master-read-bit) (set-reg :r1 (logior (ash *r1* 1) *ret*))
+  (call master-read-bit) (set-reg :r1 (logior (ash *r1* 1) *ret*))
+  (call master-read-bit) (set-reg :r1 (logior (ash *r1* 1) *ret*))
+  (call master-read-bit) (set-reg :r1 (logior (ash *r1* 1) *ret*))
+  (call master-read-bit) (set-reg :r1 (logior (ash *r1* 1) *ret*))
+  (call master-read-bit) (set-reg :r1 (logior (ash *r1* 1) *ret*))
+  (call master-read-bit) (set-reg :r1 (logior (ash *r1* 1) *ret*))
+  (print "[MASTER] Read byte: ~S~%" *r1*)
+  (call master-send-ack *r0*)
+  (return *r1*))
 
 (defsub master ()
   (call send-start-condition)
-  (set-reg :arg0 #XB8) (call master-write-byte)
-  (set-reg :arg0 #X03) (call master-write-byte)
-  (set-reg :arg0 #X02) (call master-write-byte)
-  (set-reg :arg0 #X02) (call master-write-byte)
+  (call master-write-byte #XB8)
+  (call master-write-byte #X03)
+  (call master-write-byte #X02)
+  (call master-write-byte #X02)
   (call send-stop-condition)
   (call send-start-condition)
-  (set-reg :arg0 #XB9) (call master-write-byte)
-  (set-reg :arg0 nil) (call master-read-byte)
-  (set-reg :arg0 nil) (call master-read-byte)
-  (set-reg :arg0 nil) (call master-read-byte)
-  (set-reg :arg0 nil) (call master-read-byte)
-  (set-reg :arg0 nil) (call master-read-byte)
-  (set-reg :arg0 t) (call master-read-byte)
+  (call master-write-byte #X09)
+  (call master-read-byte nil)
+  (call master-read-byte nil)
+  (call master-read-byte nil)
+  (call master-read-byte nil)
+  (call master-read-byte nil)
+  (call master-read-byte t)
   (call send-stop-condition)
   (reset))
 

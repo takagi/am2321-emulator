@@ -366,19 +366,37 @@
 ;;; Defining Subroutine macros
 ;;;
 
-(defsubmacro follow (pred)
-  (with-unique-tags (continue failed-to-follow)
-    `((set-reg :r0 *sda*)
-      (set-reg :r1 *scl*)
-      (wait (not (and (eql *sda* *r0*) (eql *scl* *r1*))))
-      (if-not-jump ,pred ,failed-to-follow)
-      (jump ,continue)
-      ,failed-to-follow
-      (error "[SLAVE] Failed to follow.~%")
-      ,continue)))
-
 (defsubmacro if-not-jump (pred tag)
   `((if-jump (not ,pred) ,tag)))
+
+(defsubmacro when (test &rest body)
+  `((unless (not ,test)
+      ,@body)))
+
+(defsubmacro unless (test &rest body)
+  (with-unique-tags (end-tag)
+    `((if-jump ,test ,end-tag)
+      ,@body
+      ,end-tag)))
+
+(defsubmacro block (&rest body)
+  body)
+
+(defsubmacro if (predicate consequent alternative)
+  (with-unique-tags (else-tag end-tag)
+    `((if-not-jump ,predicate ,else-tag)
+      ,consequent
+      (jump ,end-tag)
+      ,else-tag
+      ,alternative
+      ,end-tag)))
+
+(defsubmacro follow (pred)
+  `((set-reg :r0 *sda*)
+    (set-reg :r1 *scl*)
+    (wait (not (and (eql *sda* *r0*) (eql *scl* *r1*))))
+    (unless ,pred
+      (error "[SLAVE] Failed to follow.~%"))))
 
 
 ;;;
@@ -408,8 +426,8 @@
 (defsub slave-read-bit ()
   (wait (high *scl*))
   (set-reg :r0 (if (high *sda*) 1 0))
-  (wait (low *scl*))
 ;  (print "[SLAVE] Read bit: ~S~%" *ret*)
+  (wait (low *scl*))
   (return *r0*))
 
 (defsub slave-read-byte ()
@@ -429,33 +447,25 @@
 ;; :r0 - ACK/NACK
 (defsub slave-receive-ack (:r0)
   (wait (high *scl*))
-  (if-jump *r0* :nack)
-  (if-jump (low *sda*) :received-ack)
-  (error "[SLAVE] miss ACK.~%")
-  :received-ack
-  (print "[SLAVE] ACK received.~%")
-  (jump :endif)
-  :nack
-  (if-jump (high *sda*) :received-nack)
-  (error "[SLAVE] miss NACK.~%")
-  :received-nack
-  (print "[SLAVE] NACK received.~%")
-  :endif
+  (if (not *r0*)
+    (block                              ; ACK
+      (unless (low *sda*)
+        (error "[SLAVE] miss ACK.~%"))
+      (print "[SLAVE] ACK received.~%"))
+    (block                              ; NACK
+      (unless (high *sda*)
+        (error "[SLAVE] miss NACK.~%"))
+      (print "[SLAVE] NACK received.~%")))
   (wait (low *scl*))
   (return))
 
 ;; :r0 - bit to be written
 (defsub slave-write-bit (:r0)
-  (if-not-jump (= *r0* 0) :high)
-  (set-sda :low)
-  (jump :endif)
-  :high
-  (if-not-jump (= *r0* 1) :error)
-  (set-sda :high)
-  (jump :endif)
-  :error
-  (error "[SLAVE] The value ~S is invalid.~%" *r0*)
-  :endif
+  (unless (member *r0* '(0 1) :test #'=)
+    (error "[SLAVE] The value ~S is invalid." *r0*))
+  (if (= *r0* 0)
+    (set-sda :low)
+    (set-sda :high))
   (wait (high *scl*))
   (wait (low *scl*))
   (return))
@@ -527,25 +537,19 @@
 
 (defsub master-receive-ack ()
   (set-scl :high) (call delay)
-  (if-not-jump (low *sda*) :error)
+  (unless (low *sda*)
+    (error "[MASTER] miss ACK.~%"))
   (print "[MASTER] ACK received.~%")
   (set-scl :low) (call delay)
-  (return)
-  :error
-  (error "[MASTER] miss ACK.~%"))
+  (return))
 
 ;; :r0 - bit to be written
 (defsub master-write-bit (:r0)
-  (if-not-jump (= *r0* 0) :high)
-  (set-sda :low)
-  (jump :endif)
-  :high
-  (if-not-jump (= *r0* 1) :error)
-  (set-sda :high)
-  (jump :endif)
-  :error
-  (error "[MASTER] The value ~S is invalid.~%" *r0*)
-  :endif
+  (unless (member *r0* '(0 1) :test #'=)
+    (error "[MASTER] The value ~S is invalid." *r0*))
+  (if (= *r0* 0)
+      (set-sda :low)
+      (set-sda :high))
   (set-scl :high) (call delay)
   (set-scl :low) (call delay)
   (return))
@@ -566,24 +570,16 @@
 
 ;; :r0 - ACK/NACK
 (defsub master-send-ack (:r0)
-  (if-not-jump (null *r0*) :nack)
-  (set-sda :low)
-  (jump :endif)
-  :nack
-  (set-sda :high)
-  :endif
+  (if (null *r0*)
+      (set-sda :low)
+      (set-sda :high))
   (set-scl :high) (call delay)
   (set-scl :low) (call delay)
   (return))
 
 (defsub master-read-bit ()
   (set-scl :high) (call delay)
-  (if-not-jump (high *sda*) :low)
-  (set-reg :r0 1)
-  (jump :endif)
-  :low
-  (set-reg :r0 0)
-  :endif
+  (set-reg :r0 (if (high *sda*) 1 0))
 ;  (print "[MASTER] Read bit: ~S~%" *ret*)
   (set-scl :low) (call delay)
   (return *r0*))

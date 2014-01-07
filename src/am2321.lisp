@@ -223,26 +223,26 @@
         (or (getf tags tag)
             (setf (getf tags tag) (unique-keyword tag))))))
 
+(defmacro with-unique-tags (names &body body)
+  (alexandria:with-gensyms (unique-tag)
+    `(let ((,unique-tag (make-unique-tag)))
+       (let ,(mapcar #'(lambda (name)
+               `(,name (funcall ,unique-tag
+                                (alexandria:make-keyword ',name))))
+               names)
+         ,@body))))
+
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defun expand-submacro (insts)
-    (let ((unique-tag (make-unique-tag)))
-      (loop for inst in insts
-         append
-           (if (keywordp inst)
-               (list (funcall unique-tag inst))
-               (let ((name (car inst))
-                     (args (cdr inst)))
-                 (cond
-                   ((subroutine-macro-p name)
-                    (expand-submacro
-                     (apply (subroutine-macro-expander name) args)))
-                   ((eql name 'jump)
-                    (destructuring-bind (jump tag) inst
-                      (list `(,jump ,(funcall unique-tag tag)))))
-                   ((eql name 'if-jump)
-                    (destructuring-bind (if-jump pred tag) inst
-                      (list `(,if-jump ,pred ,(funcall unique-tag tag)))))
-                   (t (list inst)))))))))
+    (loop for inst in insts
+       append
+         (if (listp inst)
+             (destructuring-bind (name . args) inst
+               (if (subroutine-macro-p name)
+                   (expand-submacro
+                     (apply (subroutine-macro-expander name) args))
+                   (list inst)))
+             (list inst)))))
 
 
 ;;;
@@ -367,14 +367,18 @@
 ;;;
 
 (defsubmacro follow (pred)
-  `((set-reg :r0 *sda*)
-    (set-reg :r1 *scl*)
-    (wait (not (and (eql *sda* *r0*) (eql *scl* *r1*))))
-    (if-jump (not ,pred) :failed-to-follow)
-    (jump :continue)
-    :failed-to-follow
-    (error "[SLAVE] Failed to follow.~%")
-    :continue))
+  (with-unique-tags (continue failed-to-follow)
+    `((set-reg :r0 *sda*)
+      (set-reg :r1 *scl*)
+      (wait (not (and (eql *sda* *r0*) (eql *scl* *r1*))))
+      (if-not-jump ,pred ,failed-to-follow)
+      (jump ,continue)
+      ,failed-to-follow
+      (error "[SLAVE] Failed to follow.~%")
+      ,continue)))
+
+(defsubmacro if-not-jump (pred tag)
+  `((if-jump (not ,pred) ,tag)))
 
 
 ;;;
@@ -442,11 +446,11 @@
 
 ;; :r0 - bit to be written
 (defsub slave-write-bit (:r0)
-  (if-jump (not (= *r0* 0)) :high)
+  (if-not-jump (= *r0* 0) :high)
   (set-sda :low)
   (jump :endif)
   :high
-  (if-jump (not (= *r0* 1)) :error)
+  (if-not-jump (= *r0* 1) :error)
   (set-sda :high)
   (jump :endif)
   :error
@@ -500,7 +504,7 @@
 (defsub delay ()
   (set-reg :r0 0)
   :loop
-  (if-jump (not (< *r0* 1000)) :endloop)
+  (if-not-jump (< *r0* 1000) :endloop)
   (set-reg :r0 (+ *r0* 1))
   (jump :loop)
   :endloop
@@ -523,7 +527,7 @@
 
 (defsub master-receive-ack ()
   (set-scl :high) (call delay)
-  (if-jump (not (low *sda*)) :error)
+  (if-not-jump (low *sda*) :error)
   (print "[MASTER] ACK received.~%")
   (set-scl :low) (call delay)
   (return)
@@ -532,11 +536,11 @@
 
 ;; :r0 - bit to be written
 (defsub master-write-bit (:r0)
-  (if-jump (not (= *r0* 0)) :high)
+  (if-not-jump (= *r0* 0) :high)
   (set-sda :low)
   (jump :endif)
   :high
-  (if-jump (not (= *r0* 1)) :error)
+  (if-not-jump (= *r0* 1) :error)
   (set-sda :high)
   (jump :endif)
   :error
@@ -562,7 +566,7 @@
 
 ;; :r0 - ACK/NACK
 (defsub master-send-ack (:r0)
-  (if-jump (not (null *r0*)) :nack)
+  (if-not-jump (null *r0*) :nack)
   (set-sda :low)
   (jump :endif)
   :nack
@@ -574,7 +578,7 @@
 
 (defsub master-read-bit ()
   (set-scl :high) (call delay)
-  (if-jump (not (high *sda*)) :low)
+  (if-not-jump (high *sda*) :low)
   (set-reg :r0 1)
   (jump :endif)
   :low

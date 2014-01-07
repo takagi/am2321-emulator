@@ -140,31 +140,109 @@
 ;;;
 
 (defmacro defsub (name args &body insts)
-  (alexandria:with-gensyms (pc tags)
+  (alexandria:with-gensyms (insts1 pc tags)
     `(progn
        (unless (listp ',args)
          (error 'type-error :datum ',args :expected-type 'list))
-       (let ((,pc (remove-tags ',insts))
-             (,tags (make-tags ',insts)))
-         (setf (get ',name 'defsub) t
-               (get ',name 'pc) ,pc
-               (get ',name 'tags) ,tags
-               (get ',name 'args) ',args)))))
+       (when (subroutine-macro-p ',name)
+         (undef-subroutine-macro ',name))
+       (let ((,insts1 (expand-submacro ',insts)))
+         (let ((,pc (remove-tags ,insts1))
+               (,tags (make-tags ,insts1)))
+           (setf (get ',name 'defsub) t
+                 (get ',name 'pc) ,pc
+                 (get ',name 'tags) ,tags
+                 (get ',name 'args) ',args))))))
+
+(defun undef-subroutine (name)
+  (remprop name 'defsub)
+  (remprop name 'pc)
+  (remprop name 'tags)
+  (remprop name 'args))
+
+(defun subroutine-p (name)
+  (and (get name 'defsub)
+       t))
 
 (defun subroutine-pc (name)
-  (unless (get name 'defsub)
+  (unless (subroutine-p name)
     (error "The sub routine ~S not found." name))
   (get name 'pc))
 
 (defun subroutine-tags (name)
-  (unless (get name 'defsub)
+  (unless (subroutine-p name)
     (error "The sub routine ~S not found." name))
   (get name 'tags))
 
 (defun subroutine-args (name)
-  (unless (get name 'defsub)
+  (unless (subroutine-p name)
     (error "The sub routine ~S not found." name))
   (get name 'args))
+
+
+;;;
+;;; Subroutine macros
+;;;
+
+(defmacro defsubmacro (name args &body body)
+  `(progn
+     (unless (listp ',args)
+       (error 'type-error :datum ',args :expected-type 'list))
+     (when (subroutine-p ',name)
+       (undef-subroutine ',name))
+     (setf (get ',name 'defsubmacro)
+           #'(lambda ,args ,@body))))
+
+(defun undef-subroutine-macro (name)
+  (remprop name 'defsubmacro))
+
+(defun subroutine-macro-p (name)
+  (and (get name 'defsubmacro)
+       t))
+
+(defun subroutine-macro-expander (name)
+  (unless (subroutine-macro-p name)
+    (error "The subroutine macro ~S not found." name))
+  (get name 'defsubmacro))
+
+
+;;;
+;;; Subroutine macro expansion
+;;;
+
+(defun unique-keyword (keyword)
+  (unless (keywordp keyword)
+    (error 'type-error :datum keyword :expected-type 'keyword))
+  (alexandria:make-keyword (gensym (princ-to-string keyword))))
+
+(defun make-unique-tag ()
+  (let (tags)
+    #'(lambda (tag)
+        (unless (keywordp tag)
+          (error 'type-error :datum tag :expected-type 'keyword))
+        (or (getf tags tag)
+            (setf (getf tags tag) (unique-keyword tag))))))
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (defun expand-submacro (insts)
+    (let ((unique-tag (make-unique-tag)))
+      (loop for inst in insts
+         append
+           (if (keywordp inst)
+               (list (funcall unique-tag inst))
+               (let ((name (car inst))
+                     (args (cdr inst)))
+                 (cond
+                   ((subroutine-macro-p name)
+                    (expand-submacro
+                     (apply (subroutine-macro-expander name) args)))
+                   ((eql name 'jump)
+                    (destructuring-bind (jump tag) inst
+                      (list `(,jump ,(funcall unique-tag tag)))))
+                   ((eql name 'if-jump)
+                    (destructuring-bind (if-jump pred tag) inst
+                      (list `(,if-jump ,pred ,(funcall unique-tag tag)))))
+                   (t (list inst)))))))))
 
 
 ;;;
@@ -285,54 +363,37 @@
 
 
 ;;;
+;;; Defining Subroutine macros
+;;;
+
+(defsubmacro follow (pred)
+  `((set-reg :r0 *sda*)
+    (set-reg :r1 *scl*)
+    (wait (not (and (eql *sda* *r0*) (eql *scl* *r1*))))
+    (if-jump (not ,pred) :failed-to-follow)
+    (jump :continue)
+    :failed-to-follow
+    (error "[SLAVE] Failed to follow.~%")
+    :continue))
+
+
+;;;
 ;;; Slave
 ;;;
 
 (defsub wait-start-condition ()
-  ;; SDA = :high and SCL = :high
   (wait (and (high *sda*) (high *scl*)))
-  ;; SDA = :low and SCL = :high
-  (wait (not (and (high *sda*) (high *scl*))))
-  (if-jump (not (and (low *sda*) (high *scl*))) :failed-to-follow)
-  ;; SDA = :low and SCL = :low
-  (wait (not (and (low *sda*) (high *scl*))))
-  (if-jump (not (and (low *sda*) (low *scl*))) :failed-to-follow)
+  (follow (and (low *sda*) (high *scl*)))
+  (follow (and (low *sda*) (low *scl*)))
   (print "[SLAVE] Start condition received.~%")
-  (return)
-  ;; Failed to follow
-  :failed-to-follow
-  (error "[SLAVE] Failed to follow.~%"))
-
-;; (defsubmacro follow (pred)
-;;   `((set-reg :r0 *sda*)
-;;     (set-reg :r1 *scl*)
-;;     (wait (not (and (eql *sda* *r0*) (eql *scl* *r1*))))
-;;     (if-not-jump ,pred :failed-to-follow)
-;;     (return)
-;;     :failed-to-follow
-;;     (error "[SLAVE] Failed to follow.~%")))
-
-;; (defsub wait-start-condition ()
-;;   (wait (and (high *sda*) (high *scl*)))
-;;   (follow (and (low *sda*) (high *scl*)))
-;;   (follow (and (low *sda*) (low *scl*)))
-;;   (print "[SLAVE] Start condition received.~%")
-;;   (return))
+  (return))
 
 (defsub wait-stop-condition ()
-  ;; SDA = :low and SCL = :low
   (wait (and (low *sda*) (low *scl*)))
-  ;; SDA = :low and SCL = :high
-  (wait (not (and (low *sda*) (low *scl*))))
-  (if-jump (not (and (low *sda*) (high *scl*))) :failed-to-follow)
-  ;; SDA = :high and SCL = :high
-  (wait (not (and (low *sda*) (high *scl*))))
-  (if-jump (not (and (high *sda*) (high *scl*))) :failed-to-follow)
+  (follow (and (low *sda*) (high *scl*)))
+  (follow (and (high *sda*) (high *scl*)))
   (print "[SLAVE] Stop condition received.~%")
-  (return)
-  ;; Failed to follow
-  :failed-to-follow
-  (error "[SLAVE] Failed to follow.~%"))
+  (return))
 
 (defsub slave-send-ack ()
   (set-sda :low)

@@ -1,0 +1,12 @@
+TODO
+* define delation cycles of DELAY subroutine as a special variable
+* introduce FOR subroutine macro
+* compute CRC16
+* support specifing mesurement object - temperature, humidity and both
+
+DONE
+* introduce argument passing and value returning functionalities for subroutine call
+* introduce subroutine macro functionality
+* introduce IF-NOT-JUMP subroutine macro
+* introduce WHEN and UNLESS subroutine macro
+* introduce IF subroutine macro

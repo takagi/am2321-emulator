@@ -25,12 +25,12 @@
 ;;;
 
 (defstruct (register (:constructor %make-register))
-  pc tags stack entry
+  pc tags entry-pc entry-tags stack
   r0 r1 r2 r3
   ret)
 
 (defun make-register (pc tags)
-  (%make-register :pc pc :tags tags :entry pc))
+  (%make-register :pc pc :tags tags :entry-pc pc :entry-tags tags))
 
 (defvar *current*)                  
 (defvar *master*)
@@ -38,8 +38,9 @@
 
 (define-symbol-macro *pc* (register-pc *current*))
 (define-symbol-macro *tags* (register-tags *current*))
+(define-symbol-macro *entry-pc* (register-entry-pc *current*))
+(define-symbol-macro *entry-tags* (register-entry-tags *current*))
 (define-symbol-macro *stack* (register-stack *current*))
-(define-symbol-macro *entry* (register-entry *current*))
 (define-symbol-macro *r0* (register-r0 *current*))
 (define-symbol-macro *r1* (register-r1 *current*))
 (define-symbol-macro *r2* (register-r2 *current*))
@@ -116,7 +117,9 @@
   (setf *pc* (tags-pc *tags* tag)))
 
 (defun reset-pc ()
-  (setf *pc* *entry*))
+  (setf *pc* *entry-pc*
+        *tags* *entry-tags*
+        *stack* nil))
 
 
 ;;;
